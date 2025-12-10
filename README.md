@@ -263,6 +263,29 @@ Server sẽ chạy tại: **http://localhost:3000**
 - `GET /api/feedback` - Lấy danh sách feedback
 - `POST /api/feedback` - Tạo feedback mới
 
+### **🔥 Stored Procedures & Functions (MỚI)**
+
+#### Quản lý khách hàng (Procedures)
+- `POST /api/procedures/customers` - Thêm khách hàng (với validation)
+- `PUT /api/procedures/customers/:id` - Cập nhật khách hàng
+- `DELETE /api/procedures/customers/:id` - Xóa khách hàng (kiểm tra ràng buộc)
+
+#### Quản lý đơn hàng (Procedures)
+- `POST /api/procedures/orders` - Tạo đơn hàng mới
+- `POST /api/procedures/orders/items` - Thêm món vào đơn hàng
+
+#### Thống kê & Báo cáo (Procedures)
+- `GET /api/procedures/reports/revenue?tuNgay=2025-12-01&denNgay=2025-12-31` - Thống kê doanh thu
+- `GET /api/procedures/reports/popular-dishes?top=10` - Món ăn phổ biến
+
+#### Functions - Khách hàng
+- `GET /api/procedures/customers/:id/points` - Tính điểm tích lũy
+- `GET /api/procedures/customers/:id/membership` - Kiểm tra hạng thành viên
+- `GET /api/procedures/customers/:id/order-count` - Đếm số đơn hàng
+
+#### Functions - Nhân viên
+- `GET /api/procedures/staff/:id/revenue?tuNgay=2025-12-01&denNgay=2025-12-31` - Doanh thu nhân viên
+
 ---
 
 ## ⚠️ Xử lý lỗi thường gặp

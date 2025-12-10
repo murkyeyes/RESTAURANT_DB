@@ -15,6 +15,7 @@ const tableRoutes = require('./routes/tableRoutes');
 const reservationRoutes = require('./routes/reservationRoutes');
 const billRoutes = require('./routes/billRoutes');
 const feedbackRoutes = require('./routes/feedbackRoutes');
+const procedureRoutes = require('./routes/procedureRoutes'); // NEW: Procedures & Functions
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -37,7 +38,8 @@ app.get('/', (req, res) => {
             tables: '/api/tables',
             reservations: '/api/reservations',
             bills: '/api/bills',
-            feedback: '/api/feedback'
+            feedback: '/api/feedback',
+            procedures: '/api/procedures (Stored Procedures & Functions)'
         }
     });
 });
@@ -48,6 +50,7 @@ app.use('/api/menu', menuRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/tables', tableRoutes);
 app.use('/api/reservations', reservationRoutes);
+app.use('/api/procedures', procedureRoutes); // NEW: Routes for procedures & functions
 app.use('/api/bills', billRoutes);
 app.use('/api/feedback', feedbackRoutes);
 

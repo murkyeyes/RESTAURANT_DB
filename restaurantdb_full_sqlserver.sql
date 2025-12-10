@@ -222,6 +222,542 @@ CREATE TABLE audit_log (
 GO
 
 -- =============================================
+-- TRIGGERS (Ràng buộc ngữ nghĩa)
+-- =============================================
+
+-- TRIGGER 1: Kiểm tra Total Specialization cho Menu_Item
+-- Mỗi Menu_Item phải thuộc DISH hoặc INGREDIENT (không cả 2, không thiếu)
+CREATE TRIGGER trg_CheckMenuItemSpecialization
+ON menu_item
+AFTER INSERT, UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    -- Kiểm tra Item_type và sự tồn tại trong Dish/Ingredient
+    IF EXISTS (
+        SELECT i.Item_ID
+        FROM inserted i
+        WHERE i.Item_type = 'DISH' 
+        AND NOT EXISTS (SELECT 1 FROM dish WHERE Dish_ID = i.Item_ID)
+        AND EXISTS (SELECT 1 FROM ingredient WHERE Ingredient_ID = i.Item_ID)
+    )
+    BEGIN
+        RAISERROR('Menu_Item voi Item_type = DISH phai co trong bang Dish, khong duoc o trong Ingredient', 16, 1);
+        ROLLBACK TRANSACTION;
+        RETURN;
+    END
+
+    IF EXISTS (
+        SELECT i.Item_ID
+        FROM inserted i
+        WHERE i.Item_type = 'INGREDIENT'
+        AND NOT EXISTS (SELECT 1 FROM ingredient WHERE Ingredient_ID = i.Item_ID)
+        AND EXISTS (SELECT 1 FROM dish WHERE Dish_ID = i.Item_ID)
+    )
+    BEGIN
+        RAISERROR('Menu_Item voi Item_type = INGREDIENT phai co trong bang Ingredient, khong duoc o trong Dish', 16, 1);
+        ROLLBACK TRANSACTION;
+        RETURN;
+    END
+END
+GO
+
+-- TRIGGER 2: Tự động cập nhật Total_price trong Order
+-- Total_price = SUM(Quantity * Unit_price) từ OrderItem
+CREATE TRIGGER trg_UpdateOrderTotalPrice
+ON orderitem
+AFTER INSERT, UPDATE, DELETE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    -- Cập nhật cho các Order bị ảnh hưởng bởi INSERT/UPDATE
+    IF EXISTS (SELECT 1 FROM inserted)
+    BEGIN
+        UPDATE o
+        SET Total_price = ISNULL((
+            SELECT SUM(oi.Quantity * oi.Unit_price)
+            FROM orderitem oi
+            WHERE oi.Order_ID = o.Order_ID
+        ), 0)
+        FROM [order] o
+        WHERE o.Order_ID IN (SELECT DISTINCT Order_ID FROM inserted);
+    END
+    
+    -- Cập nhật cho các Order bị ảnh hưởng bởi DELETE
+    IF EXISTS (SELECT 1 FROM deleted)
+    BEGIN
+        UPDATE o
+        SET Total_price = ISNULL((
+            SELECT SUM(oi.Quantity * oi.Unit_price)
+            FROM orderitem oi
+            WHERE oi.Order_ID = o.Order_ID
+        ), 0)
+        FROM [order] o
+        WHERE o.Order_ID IN (SELECT DISTINCT Order_ID FROM deleted);
+    END
+END
+GO
+
+-- TRIGGER 3: Kiểm tra Total Participation - Mỗi Dish phải có ít nhất 1 Ingredient
+CREATE TRIGGER trg_CheckDishHasIngredient
+ON dish
+AFTER INSERT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    -- Cho phép insert Dish trước, nhưng cảnh báo
+    -- (Sẽ kiểm tra nghiêm ngặt khi xóa ingredient)
+    PRINT 'Luu y: Dish moi tao can them Ingredient vao bang Dish_Ingredient';
+END
+GO
+
+-- TRIGGER 4: Ngăn xóa Ingredient khỏi Dish nếu là ingredient cuối cùng
+CREATE TRIGGER trg_PreventDeleteLastIngredient
+ON dish_ingredient
+INSTEAD OF DELETE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    -- Kiểm tra xem có món nào sẽ mất hết ingredient không
+    IF EXISTS (
+        SELECT d.Dish_ID
+        FROM deleted d
+        GROUP BY d.Dish_ID
+        HAVING COUNT(*) = (
+            SELECT COUNT(*)
+            FROM dish_ingredient di
+            WHERE di.Dish_ID = d.Dish_ID
+        )
+    )
+    BEGIN
+        RAISERROR('Khong the xoa ingredient cuoi cung cua mot dish. Moi dish phai co it nhat 1 ingredient.', 16, 1);
+        RETURN;
+    END
+    
+    -- Nếu OK, thực hiện xóa
+    DELETE FROM dish_ingredient
+    WHERE EXISTS (
+        SELECT 1 FROM deleted d
+        WHERE dish_ingredient.Dish_ID = d.Dish_ID
+        AND dish_ingredient.Ingredient_ID = d.Ingredient_ID
+    );
+END
+GO
+
+-- TRIGGER 5: Kiểm tra Total Specialization cho Feedback
+-- Mỗi Feedback phải có Staff_Feedback HOẶC Dish_Feedback (hoặc cả 2)
+CREATE TRIGGER trg_CheckFeedbackSpecialization
+ON feedback
+AFTER INSERT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    -- Đợi một chút để các bảng con được insert
+    WAITFOR DELAY '00:00:01';
+    
+    -- Kiểm tra xem feedback có ở Staff_Feedback hoặc Dish_Feedback không
+    IF EXISTS (
+        SELECT i.Feedback_ID
+        FROM inserted i
+        WHERE NOT EXISTS (SELECT 1 FROM staff_feedback WHERE Feedback_ID = i.Feedback_ID)
+        AND NOT EXISTS (SELECT 1 FROM dish_feedback WHERE Feedback_ID = i.Feedback_ID)
+    )
+    BEGIN
+        PRINT 'Canh bao: Feedback can co it nhat 1 trong Staff_Feedback hoac Dish_Feedback';
+    END
+END
+GO
+
+-- TRIGGER 6: Tự động cập nhật điểm thành viên khi thanh toán
+CREATE TRIGGER trg_UpdateMembershipPoints
+ON bill
+AFTER INSERT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    -- Cộng điểm = Total_amount / 1000 (mỗi 1000đ = 1 điểm)
+    UPDATE m
+    SET Total_points = Total_points + CAST(i.Total_amount / 1000 AS INT)
+    FROM membership m
+    INNER JOIN inserted i ON m.Member_ID = i.Member_ID
+    WHERE i.Member_ID IS NOT NULL;
+    
+    -- Tự động nâng hạng thành viên
+    UPDATE membership
+    SET Member_rank = CASE
+        WHEN Total_points >= 1000 THEN 'Platinum'
+        WHEN Total_points >= 500 THEN 'Gold'
+        ELSE 'Silver'
+    END
+    WHERE Member_ID IN (SELECT Member_ID FROM inserted WHERE Member_ID IS NOT NULL);
+END
+GO
+
+GO
+
+-- =============================================
+-- STORED PROCEDURES (Thủ tục)
+-- =============================================
+
+-- PROCEDURE 1: Thêm khách hàng mới với kiểm tra ràng buộc
+CREATE PROCEDURE sp_ThemKhachHang
+    @CustomerID INT,
+    @Email NVARCHAR(100),
+    @FullName NVARCHAR(100),
+    @PhoneNumber NVARCHAR(20) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        BEGIN TRANSACTION;
+        
+        -- Kiểm tra email hợp lệ
+        IF @Email NOT LIKE '%@%.%'
+        BEGIN
+            THROW 50001, 'Email khong hop le. Phai co dang: user@domain.com', 1;
+        END
+        
+        -- Kiểm tra email đã tồn tại
+        IF EXISTS (SELECT 1 FROM customer WHERE Email = @Email)
+        BEGIN
+            THROW 50002, 'Email da ton tai trong he thong', 1;
+        END
+        
+        -- Thêm khách hàng
+        INSERT INTO customer (Customer_ID, Email, Full_Name)
+        VALUES (@CustomerID, @Email, @FullName);
+        
+        -- Thêm số điện thoại nếu có
+        IF @PhoneNumber IS NOT NULL
+        BEGIN
+            INSERT INTO phonenumber (Customer_ID, PhoneNumber)
+            VALUES (@CustomerID, @PhoneNumber);
+        END
+        
+        COMMIT TRANSACTION;
+        PRINT 'Them khach hang thanh cong: ' + @FullName;
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0
+            ROLLBACK TRANSACTION;
+        
+        DECLARE @ErrorMessage NVARCHAR(4000) = ERROR_MESSAGE();
+        THROW 50000, @ErrorMessage, 1;
+    END CATCH
+END
+GO
+
+-- PROCEDURE 2: Cập nhật khách hàng
+CREATE PROCEDURE sp_CapNhatKhachHang
+    @CustomerID INT,
+    @Email NVARCHAR(100) = NULL,
+    @FullName NVARCHAR(100) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        -- Kiểm tra khách hàng tồn tại
+        IF NOT EXISTS (SELECT 1 FROM customer WHERE Customer_ID = @CustomerID)
+        BEGIN
+            THROW 50003, 'Khach hang khong ton tai', 1;
+        END
+        
+        -- Cập nhật thông tin
+        UPDATE customer
+        SET 
+            Email = ISNULL(@Email, Email),
+            Full_Name = ISNULL(@FullName, Full_Name)
+        WHERE Customer_ID = @CustomerID;
+        
+        PRINT 'Cap nhat khach hang thanh cong';
+    END TRY
+    BEGIN CATCH
+        DECLARE @ErrorMessage NVARCHAR(4000) = ERROR_MESSAGE();
+        THROW 50000, @ErrorMessage, 1;
+    END CATCH
+END
+GO
+
+-- PROCEDURE 3: Xóa khách hàng (kiểm tra ràng buộc)
+CREATE PROCEDURE sp_XoaKhachHang
+    @CustomerID INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        BEGIN TRANSACTION;
+        
+        -- Kiểm tra có đơn hàng không
+        IF EXISTS (SELECT 1 FROM [order] WHERE Customer_ID = @CustomerID)
+        BEGIN
+            THROW 50004, 'Khong the xoa khach hang da co don hang. Hay xoa don hang truoc.', 1;
+        END
+        
+        -- Xóa số điện thoại
+        DELETE FROM phonenumber WHERE Customer_ID = @CustomerID;
+        
+        -- Xóa membership nếu có
+        DELETE FROM membership WHERE Customer_ID = @CustomerID;
+        
+        -- Xóa khách hàng
+        DELETE FROM customer WHERE Customer_ID = @CustomerID;
+        
+        COMMIT TRANSACTION;
+        PRINT 'Xoa khach hang thanh cong';
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0
+            ROLLBACK TRANSACTION;
+        
+        DECLARE @ErrorMessage NVARCHAR(4000) = ERROR_MESSAGE();
+        THROW 50000, @ErrorMessage, 1;
+    END CATCH
+END
+GO
+
+-- PROCEDURE 4: Tạo đơn hàng mới
+CREATE PROCEDURE sp_TaoDonHang
+    @OrderID INT,
+    @TableID INT,
+    @CustomerID INT,
+    @StaffID INT,
+    @OrderTime DATETIME = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        BEGIN TRANSACTION;
+        
+        -- Set default order time
+        IF @OrderTime IS NULL
+            SET @OrderTime = GETDATE();
+        
+        -- Kiểm tra bàn có trống không
+        DECLARE @TableStatus NVARCHAR(50);
+        SELECT @TableStatus = Status FROM restaurant_table WHERE Table_ID = @TableID;
+        
+        IF @TableStatus = N'Dang dung'
+        BEGIN
+            THROW 50005, 'Ban dang duoc su dung', 1;
+        END
+        
+        -- Tạo đơn hàng
+        INSERT INTO [order] (Order_ID, Table_ID, Customer_ID, Staff_ID, Order_time, Status, Total_price)
+        VALUES (@OrderID, @TableID, @CustomerID, @StaffID, @OrderTime, N'Dang phuc vu', 0);
+        
+        -- Cập nhật trạng thái bàn
+        UPDATE restaurant_table
+        SET Status = N'Dang dung'
+        WHERE Table_ID = @TableID;
+        
+        COMMIT TRANSACTION;
+        PRINT 'Tao don hang thanh cong: Order_ID = ' + CAST(@OrderID AS NVARCHAR(10));
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0
+            ROLLBACK TRANSACTION;
+        
+        DECLARE @ErrorMessage NVARCHAR(4000) = ERROR_MESSAGE();
+        THROW 50000, @ErrorMessage, 1;
+    END CATCH
+END
+GO
+
+-- PROCEDURE 5: Thêm món vào đơn hàng
+CREATE PROCEDURE sp_ThemMonVaoDonHang
+    @OrderID INT,
+    @DishID INT,
+    @Quantity INT,
+    @ItemNote NVARCHAR(200) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        BEGIN TRANSACTION;
+        
+        -- Lấy giá món
+        DECLARE @UnitPrice DECIMAL(18,2);
+        SELECT @UnitPrice = m.Price
+        FROM menu_item m
+        INNER JOIN dish d ON m.Item_ID = d.Dish_ID
+        WHERE d.Dish_ID = @DishID;
+        
+        IF @UnitPrice IS NULL
+        BEGIN
+            THROW 50006, 'Mon an khong ton tai', 1;
+        END
+        
+        -- Kiểm tra món đã có trong order chưa
+        IF EXISTS (SELECT 1 FROM orderitem WHERE Order_ID = @OrderID AND Dish_ID = @DishID)
+        BEGIN
+            -- Cập nhật số lượng
+            UPDATE orderitem
+            SET Quantity = Quantity + @Quantity
+            WHERE Order_ID = @OrderID AND Dish_ID = @DishID;
+        END
+        ELSE
+        BEGIN
+            -- Thêm mới
+            INSERT INTO orderitem (Order_ID, Dish_ID, Quantity, Unit_price, Status, Item_note)
+            VALUES (@OrderID, @DishID, @Quantity, @UnitPrice, N'Dang lam', @ItemNote);
+        END
+        
+        COMMIT TRANSACTION;
+        PRINT 'Them mon vao don hang thanh cong';
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0
+            ROLLBACK TRANSACTION;
+        
+        DECLARE @ErrorMessage NVARCHAR(4000) = ERROR_MESSAGE();
+        THROW 50000, @ErrorMessage, 1;
+    END CATCH
+END
+GO
+
+-- PROCEDURE 6: Lấy thống kê doanh thu theo ngày
+CREATE PROCEDURE sp_ThongKeDoanhThu
+    @TuNgay DATE,
+    @DenNgay DATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    SELECT 
+        CAST(b.Bill_time AS DATE) AS Ngay,
+        COUNT(b.Bill_ID) AS SoLuongBill,
+        SUM(b.Total_amount) AS TongDoanhThu,
+        AVG(b.Total_amount) AS DoanhThuTrungBinh,
+        SUM(b.Total_amount * b.Discount / 100) AS TongGiamGia
+    FROM bill b
+    WHERE CAST(b.Bill_time AS DATE) BETWEEN @TuNgay AND @DenNgay
+    GROUP BY CAST(b.Bill_time AS DATE)
+    ORDER BY Ngay DESC;
+END
+GO
+
+-- PROCEDURE 7: Lấy món ăn phổ biến nhất
+CREATE PROCEDURE sp_MonAnPhoBien
+    @Top INT = 10
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    SELECT TOP (@Top)
+        m.Item_ID,
+        m.Name AS TenMon,
+        m.Category AS DanhMuc,
+        m.Price AS Gia,
+        COUNT(oi.Order_ID) AS SoLanGoi,
+        SUM(oi.Quantity) AS TongSoLuong,
+        SUM(oi.Quantity * oi.Unit_price) AS TongDoanhThu
+    FROM menu_item m
+    INNER JOIN dish d ON m.Item_ID = d.Dish_ID
+    INNER JOIN orderitem oi ON d.Dish_ID = oi.Dish_ID
+    GROUP BY m.Item_ID, m.Name, m.Category, m.Price
+    ORDER BY SoLanGoi DESC, TongSoLuong DESC;
+END
+GO
+
+GO
+
+-- =============================================
+-- FUNCTIONS (Hàm)
+-- =============================================
+
+-- FUNCTION 1: Tính tổng điểm của khách hàng
+CREATE FUNCTION fn_TinhDiemKhachHang(@CustomerID INT)
+RETURNS INT
+AS
+BEGIN
+    DECLARE @TotalPoints INT = 0;
+    
+    SELECT @TotalPoints = ISNULL(Total_points, 0)
+    FROM membership
+    WHERE Customer_ID = @CustomerID;
+    
+    RETURN @TotalPoints;
+END
+GO
+
+-- FUNCTION 2: Tính tổng doanh thu của một nhân viên
+CREATE FUNCTION fn_TinhDoanhThuNhanVien(
+    @StaffID INT,
+    @TuNgay DATE,
+    @DenNgay DATE
+)
+RETURNS DECIMAL(18,2)
+AS
+BEGIN
+    DECLARE @TongDoanhThu DECIMAL(18,2) = 0;
+    
+    SELECT @TongDoanhThu = ISNULL(SUM(b.Total_amount), 0)
+    FROM bill b
+    INNER JOIN [order] o ON b.Order_ID = o.Order_ID
+    WHERE o.Staff_ID = @StaffID
+    AND CAST(b.Bill_time AS DATE) BETWEEN @TuNgay AND @DenNgay;
+    
+    RETURN @TongDoanhThu;
+END
+GO
+
+-- FUNCTION 3: Kiểm tra khách hàng có membership không
+CREATE FUNCTION fn_KiemTraMembership(@CustomerID INT)
+RETURNS NVARCHAR(20)
+AS
+BEGIN
+    DECLARE @Rank NVARCHAR(20) = 'Khong co';
+    
+    SELECT @Rank = Member_rank
+    FROM membership
+    WHERE Customer_ID = @CustomerID;
+    
+    RETURN ISNULL(@Rank, 'Khong co');
+END
+GO
+
+-- FUNCTION 4: Tính % discount theo rank membership
+CREATE FUNCTION fn_TinhDiscountTheoRank(@MemberRank NVARCHAR(20))
+RETURNS DECIMAL(5,2)
+AS
+BEGIN
+    DECLARE @Discount DECIMAL(5,2) = 0;
+    
+    SET @Discount = CASE @MemberRank
+        WHEN 'Platinum' THEN 20.00
+        WHEN 'Gold' THEN 15.00
+        WHEN 'Silver' THEN 10.00
+        ELSE 0.00
+    END;
+    
+    RETURN @Discount;
+END
+GO
+
+-- FUNCTION 5: Lấy số lượng đơn hàng của khách hàng
+CREATE FUNCTION fn_DemDonHang(@CustomerID INT)
+RETURNS INT
+AS
+BEGIN
+    DECLARE @SoLuong INT = 0;
+    
+    SELECT @SoLuong = COUNT(*)
+    FROM [order]
+    WHERE Customer_ID = @CustomerID;
+    
+    RETURN @SoLuong;
+END
+GO
+
+GO
+
+-- =============================================
 -- INSERT DATA
 -- =============================================
 

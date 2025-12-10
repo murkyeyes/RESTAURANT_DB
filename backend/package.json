@@ -1,0 +1,23 @@
+{
+  "name": "restaurant-backend",
+  "version": "1.0.0",
+  "description": "Backend API cho hệ thống quản lý nhà hàng",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js"
+  },
+  "keywords": ["restaurant", "api", "sqlserver"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.18.2",
+    "mssql": "^10.0.1",
+    "dotenv": "^16.3.1",
+    "cors": "^2.8.5",
+    "body-parser": "^1.20.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
